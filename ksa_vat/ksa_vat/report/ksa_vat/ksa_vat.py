@@ -309,17 +309,30 @@ def get_tax_amount(account_head, doctype, parent):
 	tax_entries = frappe.get_all(
 		tax_doctype,
 		filters={
-			"docstatus": 1, 
-			"parent": parent, 
+			"docstatus": 1,
+			"parent": parent,
 			"account_head": account_head
 		},
-		fields=["tax_amount", "base_tax_amount"]
+		fields=[
+			"tax_amount",
+			"base_tax_amount",
+			"tax_amount_after_discount_amount",
+			"base_tax_amount_after_discount_amount",
+		]
 	)
 
 	total_tax_amount = 0
 	for entry in tax_entries:
-		# Use base_tax_amount if available, otherwise use tax_amount
-		tax_amount = entry.get("base_tax_amount") or entry.get("tax_amount") or 0
+		# base_tax_amount holds the pre-discount tax; when an additional
+		# discount is applied on Grand Total, the tax actually charged is
+		# in *_after_discount_amount, which matches the invoice totals and GL
+		tax_amount = (
+			entry.get("base_tax_amount_after_discount_amount")
+			or entry.get("tax_amount_after_discount_amount")
+			or entry.get("base_tax_amount")
+			or entry.get("tax_amount")
+			or 0
+		)
 		total_tax_amount += tax_amount
 
 	return total_tax_amount
