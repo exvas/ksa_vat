@@ -1,19 +1,28 @@
 # Copyright (c) 2025, Ashkar and contributors
 # For license information, please see license.txt
 
-import json
 import frappe
 from frappe import _
 from frappe.utils import get_url_to_list
 
 
 def execute(filters=None):
-	columns = get_columns()
+	filters = filters or {}
+	company = filters.get("company")
+	company_currency = (
+		frappe.get_cached_value("Company", company, "default_currency")
+		if company
+		else None
+	)
+	columns = get_columns(company_currency)
 	data = get_data(filters)
 	return columns, data
 
 
-def get_columns():
+def get_columns(currency=None):
+	# The report is always shown in the company's own currency, so the
+	# headings carry that currency rather than a hard-coded "SAR".
+	currency_suffix = f" ({currency})" if currency else ""
 	return [
 		{
 			"fieldname": "title",
@@ -23,21 +32,21 @@ def get_columns():
 		},
 		{
 			"fieldname": "amount",
-			"label": _("Amount (SAR)"),
+			"label": _("Amount{0}").format(currency_suffix),
 			"fieldtype": "Currency",
 			"options": "currency",
 			"width": 150,
 		},
 		{
 			"fieldname": "adjustment_amount",
-			"label": _("Adjustment (SAR)"),
+			"label": _("Adjustment{0}").format(currency_suffix),
 			"fieldtype": "Currency",
 			"options": "currency",
 			"width": 150,
 		},
 		{
 			"fieldname": "vat_amount",
-			"label": _("VAT Amount (SAR)"),
+			"label": _("VAT Amount{0}").format(currency_suffix),
 			"fieldtype": "Currency",
 			"options": "currency",
 			"width": 150,
@@ -57,6 +66,8 @@ def get_data(filters):
 
 	# Validate if vat settings exist
 	company = filters.get("company")
+	if not company:
+		frappe.throw(_("Company is required"))
 	company_currency = frappe.get_cached_value("Company", company, "default_currency")
 
 	if frappe.db.exists("KSA VAT Setting", company) is None:
@@ -222,59 +233,66 @@ def get_tax_data_for_each_vat_setting(vat_setting, filters, doctype):
 	# Get company from filters for additional filtering
 	company = filters.get("company")
 
+	tax_doctype = (
+		"Purchase Taxes and Charges"
+		if doctype == "Purchase Invoice"
+		else "Sales Taxes and Charges"
+	)
+
 	invoices = frappe.get_all(
 		doctype,
 		filters={
-			"docstatus": 1, 
+			"docstatus": 1,
 			"posting_date": ["between", [from_date, to_date]],
-			"company": company
+			"company": company,
 		},
 		fields=["name", "is_return"],
 	)
 
 	for invoice in invoices:
-		# First check if invoice has any items with the specific item_tax_template
+		# An invoice may carry the VAT only in its taxes table, with no
+		# item_tax_template on the items. Only then do untemplated items
+		# belong to this VAT setting, and only when this account is on the
+		# invoice. Items tagged with some OTHER template never belong here,
+		# which is what stops the totals being over- and under-counted.
+		invoice_has_tax_account = frappe.db.exists(
+			tax_doctype,
+			{
+				"docstatus": 1,
+				"parent": invoice.name,
+				"account_head": vat_setting.account,
+			},
+		)
+
 		invoice_items = frappe.get_all(
 			f"{doctype} Item",
 			filters={
 				"docstatus": 1,
 				"parent": invoice.name,
-				"item_tax_template": vat_setting.item_tax_template,
 			},
-			fields=["item_code", "net_amount", "base_net_amount"],
+			fields=["item_tax_template", "net_amount", "base_net_amount"],
 		)
 
-		# If no items match the tax template, check if there are items without tax template
-		# but the invoice has the tax account in taxes table
-		if not invoice_items:
-			# Check if this invoice has the tax account
-			has_tax_account = frappe.db.exists(
-				"Purchase Taxes and Charges" if doctype == "Purchase Invoice" else "Sales Taxes and Charges",
-				{
-					"docstatus": 1,
-					"parent": invoice.name,
-					"account_head": vat_setting.account
-				}
-			)
-			
-			if has_tax_account:
-				# Get all items for this invoice (fallback when item tax template is not set)
-				invoice_items = frappe.get_all(
-					f"{doctype} Item",
-					filters={
-						"docstatus": 1,
-						"parent": invoice.name,
-					},
-					fields=["item_code", "net_amount", "base_net_amount"],
-				)
+		invoice_items = [
+			item
+			for item in invoice_items
+			if item.item_tax_template == vat_setting.item_tax_template
+			or (not item.item_tax_template and invoice_has_tax_account)
+		]
 
 		if not invoice_items:
 			continue  # Skip this invoice if no matching items
 
 		for item in invoice_items:
-			# Use base_net_amount if available, otherwise use net_amount
-			amount = item.get("base_net_amount") or item.get("net_amount") or 0
-			
+			# base_net_amount is the company-currency amount. A real 0.00 is
+			# still that amount, so test for None rather than truth, or a
+			# zero base falls through to the foreign-currency net_amount.
+			amount = item.base_net_amount
+			if amount is None:
+				amount = item.net_amount
+			if amount is None:
+				amount = 0
+
 			if invoice.is_return == 0:
 				total_taxable_amount += amount
 			elif invoice.is_return == 1:
@@ -325,14 +343,19 @@ def get_tax_amount(account_head, doctype, parent):
 	for entry in tax_entries:
 		# base_tax_amount holds the pre-discount tax; when an additional
 		# discount is applied on Grand Total, the tax actually charged is
-		# in *_after_discount_amount, which matches the invoice totals and GL
-		tax_amount = (
-			entry.get("base_tax_amount_after_discount_amount")
-			or entry.get("tax_amount_after_discount_amount")
-			or entry.get("base_tax_amount")
-			or entry.get("tax_amount")
-			or 0
-		)
+		# in *_after_discount_amount, which matches the invoice totals and GL.
+		# base_* is the company-currency amount: a real 0.00 is still that
+		# amount, so test for None rather than truth, or it falls through to
+		# the foreign-currency figure.
+		tax_amount = entry.base_tax_amount_after_discount_amount
+		if tax_amount is None:
+			tax_amount = entry.tax_amount_after_discount_amount
+		if tax_amount is None:
+			tax_amount = entry.base_tax_amount
+		if tax_amount is None:
+			tax_amount = entry.tax_amount
+		if tax_amount is None:
+			tax_amount = 0
 		total_tax_amount += tax_amount
 
 	return total_tax_amount
