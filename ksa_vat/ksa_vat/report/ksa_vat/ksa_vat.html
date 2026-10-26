@@ -1,66 +1,76 @@
-{% if data %}
-{% set currency = data[0].currency %}
-{% set currency_suffix = " (" ~ currency ~ ")" if currency else "" %}
 <style>
-    table {
-        width: 100%;
-        border-collapse: collapse;
-        margin-bottom: 20px;
-        font-family: Arial, sans-serif;
-    }
-    th, td {
-        border: 1px solid #ddd;
-        padding: 8px;
-        text-align: right;
-    }
-    th {
-        background-color: #f2f2f2;
-        font-weight: bold;
-    }
-    .title-col {
-        text-align: left;
-        width: 50%;
-    }
-    .bold-row {
-        font-weight: bold;
-    }
-    .summary-header {
-        font-weight: bold;
-        background-color: #e7f3ff;
-        text-align: center;
-    }
-    .status-row {
-        background-color: #f9f9f9;
-    }
-    @media print {
-        table { page-break-inside: auto; }
-        tr { page-break-inside: avoid; page-break-after: auto; }
-        /* Bold key VAT amounts in print view only */
-        .vat-amount-bold {
-            font-weight: bold !important;
-        }
-    }
+	.ksa-vat-print table {
+		width: 100%;
+		border-collapse: collapse;
+		margin-bottom: 20px;
+	}
+	.ksa-vat-print th, .ksa-vat-print td {
+		border: 1px solid #ddd;
+		padding: 6px 8px;
+		text-align: right;
+	}
+	.ksa-vat-print th {
+		background-color: #f2f2f2;
+		font-weight: bold;
+	}
+	.ksa-vat-print .title-col {
+		text-align: left;
+		width: 50%;
+	}
+	.ksa-vat-print .bold-row {
+		font-weight: bold;
+	}
+	.ksa-vat-print .summary-header {
+		font-weight: bold;
+		background-color: #e7f3ff;
+	}
+	.ksa-vat-print tr {
+		page-break-inside: avoid;
+	}
 </style>
 
-<table>
-    <thead>
-        <tr>
-            <th class="title-col">{{ _("Title") }}</th>
-            <th>{{ _("Amount") }}{{ currency_suffix }}</th>
-            <th>{{ _("Adjustment") }}{{ currency_suffix }}</th>
-            <th>{{ _("VAT Amount") }}{{ currency_suffix }}</th>
-        </tr>
-    </thead>
-    <tbody>
-        {% for row in data %}
-        <tr class="{% if 'Total' in row.title or 'TAX PAYABLE' in row.title %}bold-row{% endif %} {% if 'TAX PAYABLE SUMMARY' in row.title %}summary-header{% endif %} {% if 'Status:' in row.title %}status-row{% endif %}">
-            <td class="title-col">{{ row.title | safe }}</td>
-            <td>{% if row.amount is number %}{% if 'Standard rated domestic purchases' in row.title %}<span class="vat-amount-bold">{{ frappe.format_value(row.amount, {"fieldtype": "Currency", "options": row.currency}) }}</span>{% else %}{{ frappe.format_value(row.amount, {"fieldtype": "Currency", "options": row.currency}) }}{% endif %}{% endif %}</td>
-            <td>{% if row.adjustment_amount is number %}{{ frappe.format_value(row.adjustment_amount, {"fieldtype": "Currency", "options": row.currency}) }}{% endif %}</td>
-            <td>{% if row.vat_amount is number %}{% if 'Total Output VAT' in row.title or 'Total Input VAT' in row.title or 'VAT Payable to Government' in row.title or 'Standard rated domestic purchases' in row.title %}<span class="vat-amount-bold">{{ frappe.format_value(row.vat_amount, {"fieldtype": "Currency", "options": row.currency}) }}</span>{% else %}{{ frappe.format_value(row.vat_amount, {"fieldtype": "Currency", "options": row.currency}) }}{% endif %}{% endif %}</td>
-        </tr>
-        {% endfor %}
-    </tbody>
-</table>
+{%
+	var currency = (data.length && data[0].currency) || "";
+	var suffix = currency ? " (" + currency + ")" : "";
+	var fmt = function(value) {
+		return (typeof value === "number") ? format_currency(value, currency) : "";
+	};
+	var section_titles = ["VAT on Sales", "VAT on Purchases", "TAX PAYABLE SUMMARY"];
+%}
 
-{% endif %}
+<div class="ksa-vat-print">
+	<h2 class="text-center">{%= __("KSA VAT") %}</h2>
+	<h5 class="text-center">
+		{%= filters.company %}<br>
+		{%= frappe.datetime.str_to_user(filters.from_date) %} {%= __("to") %} {%= frappe.datetime.str_to_user(filters.to_date) %}
+	</h5>
+	<hr>
+	<table>
+		<thead>
+			<tr>
+				<th class="title-col">{%= __("Title") %}</th>
+				<th>{%= __("Amount") + suffix %}</th>
+				<th>{%= __("Adjustment") + suffix %}</th>
+				<th>{%= __("VAT Amount") + suffix %}</th>
+			</tr>
+		</thead>
+		<tbody>
+			{% for (var i = 0; i < data.length; i++) {
+				var row = data[i];
+				var title = row.title || "";
+				var is_bold = section_titles.indexOf(title) !== -1
+					|| title.indexOf("Total") !== -1
+					|| title.indexOf("Payable") !== -1;
+				var is_blank = !title;
+			%}
+			<tr class="{%= is_bold ? "bold-row" : "" %} {%= title === "TAX PAYABLE SUMMARY" ? "summary-header" : "" %}">
+				<td class="title-col">{%= title %}</td>
+				<td>{%= is_blank ? "" : fmt(row.amount) %}</td>
+				<td>{%= is_blank ? "" : fmt(row.adjustment_amount) %}</td>
+				<td>{%= is_blank ? "" : fmt(row.vat_amount) %}</td>
+			</tr>
+			{% } %}
+		</tbody>
+	</table>
+	<p class="text-right text-muted">{%= __("Printed On") %} {%= frappe.datetime.str_to_user(frappe.datetime.get_datetime_as_string()) %}</p>
+</div>
